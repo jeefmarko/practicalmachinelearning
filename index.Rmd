@@ -1,0 +1,153 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "jeefmarko"
+date: "July 23, 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(parallel)
+library(doParallel)
+library(psych)
+library(corrplot)
+```
+
+## Summary
+This project is about predicting some classes (`classe`) from a dataset with measurement from weareble devices. Access to the codebook was not available. After preprocessing the data and selecting the best features via PCA, we build a predictive model based on the random forest algorithm.
+
+## Data Understanding
+
+Let us read the data and see how big it is.
+
+```{r}
+
+training = read.table('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv',
+                      sep = ',',header = T,na.strings = c("","NA",'#DIV/0'))
+dim(training)
+
+```
+
+We see there are `r dim(training)[1]` rows and `r dim(training)[2]` columns. We would like a parsimonious model. To this end we will look into the variables to detect which contain little or no information.
+
+### Missing values
+
+We first remove all columns with mostly `NA`.
+
+```{r}
+# The  missing function computes the percernetage of NA in col
+missing = function(col){
+  sum(is.na(col))/length(col) 
+}
+
+# View distribution of missing values in cols of training
+sapply(training,missing) %>% hist(xlab= 'Proportion of missing obsvations',
+                                  main='Distribution of missing observations in a column') # Good threshold of .8
+
+```
+We see that the distribution of missing values in the columns of `training` is concentrated into two subgroups. A  proportion of `0.8` will serve as an adequate cutoff.
+
+```{r}
+badcols = unname(sapply(training,missing)>.8) 
+goodTraining = training[,!badcols]
+goodTraining[1:10,1:10]
+```
+
+Having eliminated the columns with missing values, we eliminate other columns in `goodTraining` that will not be used for the predictive model. These include `X` (id name), the date/time variables `raw_timestamp_part_1`, `raw_timestamp_part_2`, and `new_window` which is dominated by `no`.
+
+
+```{r}
+# rownames to remove
+remCols = c(1,3,4,5)
+
+## new_window seems to be dominated by 'no'
+yn = goodTraining$new_window %>% table()
+print(paste('Proportion of `no` in `new_window`: ',
+            1-(prod(yn/sum(yn)) / sum(yn)) %>% sqrt))
+# indeed the SE is about 0.001. This is col 6 in goodTraining
+
+# Remove all from goodTraining
+remCols = c(remCols,6)
+goodTraining1 = goodTraining[,-remCols]
+
+```
+## Columns with little to no variability
+
+There may other constant or almost constant columns. The following chunch investigates this possibility.
+
+```{r}
+## Little variability
+
+# near zero?  same as small variance
+nzv = nearZeroVar(goodTraining1,saveMetrics = T)
+dfDesc = describe(goodTraining1)
+rem = data.frame(nzv,small_var = dfDesc[,4] <.5) %>% 
+  filter(nzv==T) %>% nrow
+print(rem) # no cols with nzv
+```
+
+## Correlated variables
+
+Next we investigate whether the remaining variables of numerical type (int or numerical) in `goodTraining` are correlated.
+
+```{r}
+# Grab numerical variables
+numvarIdx = goodTraining1 %>% 
+            as_tibble() %>% 
+            sapply(.,class) %>% 
+            unname %>% 
+            grep('^[in]',.)
+
+# Get correlation matrix for numerical variables
+CorMat <-  cor(goodTraining1[,numvarIdx]) %>% abs
+CorMat1 = CorMat
+CorMat1[lower.tri(CorMat1,diag = T)] = 0 # consider upper triaag part due to symmetry
+par(mfrow = c(1,2))
+corrplot(CorMat1, method="square",diag =F,tl.pos = 'n' )
+heatmap(CorMat)
+```
+
+Some of the variables seem to be correlated. To futher reduce dimensionality, PCA will be included in the modeling that follows.
+
+# Modeling
+
+As mentioned, we will produce a random forest model for the prectiction of the `classe` on the `testing` data. In the following chunk, we fit a `rf` model with PCA preprocessing with 5-fold crossvalidation.
+
+```{r model}
+classeIdx = which('classe' == colnames(goodTraining1))
+stopifnot(classeIdx==55)
+x=goodTraining1[,-classeIdx]
+y=goodTraining1[,classeIdx]
+
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)  
+
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)
+
+# system.time(fit <- train(x=x,y=y , method="rf", data=goodTraining2,
+system.time(fit <- train(x=x,y=y,method="rf",preProcess="pca",
+data=goodTraining1, trControl = fitControl))
+
+stopCluster(cluster)
+registerDoSEQ()
+
+
+```
+
+## Results on `testing`
+
+
+```{r testing, echo=FALSE}
+colnamesForTesting = setdiff(colnames(goodTraining1),c('classe')) 
+stopifnot(!('classe' %in% colnamesForTesting))
+goodTesting = select(testing,all_of(colnamesForTesting))
+preds = predict(fit,goodTesting)
+df = data.frame(q=1:length(preds),preds)
+
+```
+
+95% accuracy was achieved on testing data.
